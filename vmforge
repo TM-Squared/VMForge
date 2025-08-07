@@ -1,0 +1,322 @@
+#!/bin/bash
+# VMForge - Quick VM Creation Tool
+# Author: TOUSSI Manoel Malaury
+# Organisation: Gintou
+# Description: Create and launch VMs with KVM/QEMU
+# Usage: ./vmforge [options] ou mode interactif
+
+set -e
+
+# Couleurs pour l'affichage
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+# Valeurs par défaut
+DEFAULT_OS_IMAGE="debian-12"
+DEFAULT_VM_NAME="vm-$(date +%s)"
+DEFAULT_VM_USER="admin"
+DEFAULT_VM_PASSWORD="secret"
+DEFAULT_VM_SIZE="8G"
+DEFAULT_VM_MEMORY="2048"
+DEFAULT_VM_CPUS="2"
+DEFAULT_SSH_PORT="2222"
+DEFAULT_SSH_KEY="~/.ssh/vm_key"
+DEFAULT_PACKAGES="vim"
+
+# Variables
+OS_IMAGE=""
+VM_NAME=""
+VM_USER=""
+VM_PASSWORD=""
+VM_SIZE=""
+VM_MEMORY=""
+VM_CPUS=""
+SSH_PORT=""
+SSH_KEY=""
+PACKAGES=""
+CREATE_SSH_KEY=false
+START_VM=true
+
+show_help() {
+    cat << EOF
+Usage: $0 [OPTIONS]
+
+OPTIONS:
+    -o, --os          OS image (ex: debian-12, ubuntu-22.04)
+    -n, --name        VM name
+    -u, --user        Username
+    -p, --password    User password
+    -s, --size        Disk size (ex: 8G)
+    -m, --memory      RAM in MB (ex: 2048)
+    -c, --cpus        Number of CPUs (ex: 2)
+    -P, --port        SSH port (ex: 2222)
+    -k, --key         SSH key path
+    --packages        Packages to install (ex: vim,git,htop)
+    --create-key      Create SSH key if not exists
+    --no-start        Don't start VM after creation
+    -i, --interactive Interactive mode
+    -h, --help        Show this help
+
+Examples:
+    $0 -i                                    # Interactive mode
+    $0 -o debian-11 -n test -u john         # With arguments
+    $0 --interactive                         # Interactive mode
+    $0 -o ubuntu-22.04 -n web --create-key  # Create with SSH key
+    $0 -n dev --packages "vim,git,htop,curl" # Custom packages
+
+EOF
+}
+
+list_available_images() {
+    echo -e "${YELLOW}Images disponibles:${NC}"
+    echo "Debian:"
+    virt-builder --list | grep debian | head -10
+    echo ""
+    echo "Ubuntu:"
+    virt-builder --list | grep ubuntu | head -10
+    echo ""
+    echo -e "${YELLOW}Pour voir toutes les images: virt-builder --list${NC}"
+    echo ""
+}
+
+interactive_mode() {
+    echo -e "${GREEN}=== Création VM Interactive ===${NC}"
+    echo ""
+    
+    list_available_images
+    
+    read -p "OS image [$DEFAULT_OS_IMAGE]: " OS_IMAGE
+    OS_IMAGE=${OS_IMAGE:-$DEFAULT_OS_IMAGE}
+    
+    read -p "VM name [$DEFAULT_VM_NAME]: " VM_NAME
+    VM_NAME=${VM_NAME:-$DEFAULT_VM_NAME}
+    
+    read -p "Username [$DEFAULT_VM_USER]: " VM_USER
+    VM_USER=${VM_USER:-$DEFAULT_VM_USER}
+    
+    read -s -p "Password [$DEFAULT_VM_PASSWORD]: " VM_PASSWORD
+    echo ""
+    VM_PASSWORD=${VM_PASSWORD:-$DEFAULT_VM_PASSWORD}
+    
+    read -p "Disk size [$DEFAULT_VM_SIZE]: " VM_SIZE
+    VM_SIZE=${VM_SIZE:-$DEFAULT_VM_SIZE}
+    
+    read -p "Memory MB [$DEFAULT_VM_MEMORY]: " VM_MEMORY
+    VM_MEMORY=${VM_MEMORY:-$DEFAULT_VM_MEMORY}
+    
+    read -p "CPUs [$DEFAULT_VM_CPUS]: " VM_CPUS
+    VM_CPUS=${VM_CPUS:-$DEFAULT_VM_CPUS}
+    
+    read -p "SSH port [$DEFAULT_SSH_PORT]: " SSH_PORT
+    SSH_PORT=${SSH_PORT:-$DEFAULT_SSH_PORT}
+    
+    read -p "SSH key path [$DEFAULT_SSH_KEY]: " SSH_KEY
+    SSH_KEY=${SSH_KEY:-$DEFAULT_SSH_KEY}
+    
+    read -p "Packages to install [$DEFAULT_PACKAGES]: " PACKAGES
+    PACKAGES=${PACKAGES:-$DEFAULT_PACKAGES}
+    
+    read -p "Create SSH key if not exists? [y/N]: " create_key
+    [[ $create_key =~ ^[Yy]$ ]] && CREATE_SSH_KEY=true
+    
+    read -p "Start VM after creation? [Y/n]: " start_vm
+    if [[ $start_vm =~ ^[Nn]$ ]]; then
+        START_VM=false
+    else
+        START_VM=true
+    fi
+}
+
+create_ssh_key() {
+    local key_path=$(eval echo $SSH_KEY)
+    if [[ ! -f "$key_path" && $CREATE_SSH_KEY == true ]]; then
+        echo -e "${YELLOW}Création de la clé SSH: $key_path${NC}"
+        mkdir -p $(dirname $key_path)
+        ssh-keygen -t ed25519 -f "$key_path" -N "" -C "vm-key-$(date +%Y%m%d)"
+        echo -e "${GREEN}Clé SSH créée: $key_path${NC}"
+    fi
+}
+
+create_vm() {
+    local vm_file="${VM_NAME}.qcow2"
+    local key_path=$(eval echo $SSH_KEY)
+    
+    echo -e "${GREEN}=== Création de la VM ===${NC}"
+    echo "OS: $OS_IMAGE"
+    echo "Name: $VM_NAME"
+    echo "User: $VM_USER"
+    echo "Size: $VM_SIZE"
+    echo "Memory: $VM_MEMORY MB"
+    echo "CPUs: $VM_CPUS"
+    echo "SSH Port: $SSH_PORT"
+    echo "Packages: openssh-server,sudo,$PACKAGES"
+    echo "File: $vm_file"
+    echo ""
+    
+    # Création de l'image
+    echo -e "${YELLOW}Création de l'image...${NC}"
+    
+    # Paquets essentiels + paquets custom
+    local essential_packages="openssh-server,sudo"
+    local all_packages="$essential_packages,$PACKAGES"
+    
+    local cmd="virt-builder $OS_IMAGE \
+  --output $vm_file \
+  --format raw \
+  --size $VM_SIZE \
+  --hostname $VM_NAME \
+  --install $all_packages \
+  --run-command 'useradd -m -s /bin/bash $VM_USER && echo \"$VM_USER:$VM_PASSWORD\" | chpasswd && usermod -aG sudo $VM_USER' \
+  --run-command 'systemctl enable ssh && systemctl enable systemd-networkd' \
+  --write $'/etc/systemd/network/20-wired.network:[Match]\nType=ether\n\n[Network]\nDHCP=yes' \
+  --root-password password:$VM_PASSWORD"
+
+    # Ajouter la clé SSH si elle existe
+    if [[ -f "$key_path.pub" ]]; then
+        cmd="$cmd --ssh-inject $VM_USER:file:$key_path.pub"
+        echo -e "${GREEN}Clé SSH ajoutée: $key_path.pub${NC}"
+    fi
+    
+    eval $cmd
+    
+    # Configuration du mot de passe
+    echo -e "${YELLOW}Configuration du mot de passe...${NC}"
+    virt-customize -a $vm_file --password $VM_USER:password:$VM_PASSWORD
+    
+    echo -e "${GREEN}VM créée: $vm_file${NC}"
+}
+
+start_vm() {
+    if [[ $START_VM == true ]]; then
+        local vm_file="${VM_NAME}.qcow2"
+        
+        echo -e "${YELLOW}Démarrage de la VM...${NC}"
+        qemu-system-x86_64 -enable-kvm \
+          -m $VM_MEMORY \
+          -smp $VM_CPUS \
+          -drive file=$vm_file,format=raw \
+          -netdev user,id=net0,hostfwd=tcp:127.0.0.1:$SSH_PORT-:22 \
+          -device virtio-net-pci,netdev=net0 \
+          -display none \
+          -daemonize
+        
+        echo -e "${GREEN}VM démarrée!${NC}"
+        echo ""
+        echo -e "${YELLOW}Connexion:${NC}"
+        local key_path=$(eval echo $SSH_KEY)
+        if [[ -f "$key_path" ]]; then
+            echo "ssh -i $key_path $VM_USER@localhost -p $SSH_PORT"
+        else
+            echo "ssh $VM_USER@localhost -p $SSH_PORT"
+        fi
+        
+        echo ""
+        echo -e "${YELLOW}Commandes utiles:${NC}"
+        echo "Arrêter: pkill qemu-system-x86_64"
+        echo "Vérifier: ps aux | grep qemu"
+        echo "Nettoyer SSH: ssh-keygen -R \"[localhost]:$SSH_PORT\""
+    fi
+}
+
+# Parse des arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -o|--os)
+            OS_IMAGE="$2"
+            shift 2
+            ;;
+        -n|--name)
+            VM_NAME="$2"
+            shift 2
+            ;;
+        -u|--user)
+            VM_USER="$2"
+            shift 2
+            ;;
+        -p|--password)
+            VM_PASSWORD="$2"
+            shift 2
+            ;;
+        -s|--size)
+            VM_SIZE="$2"
+            shift 2
+            ;;
+        -m|--memory)
+            VM_MEMORY="$2"
+            shift 2
+            ;;
+        -c|--cpus)
+            VM_CPUS="$2"
+            shift 2
+            ;;
+        -P|--port)
+            SSH_PORT="$2"
+            shift 2
+            ;;
+        -k|--key)
+            SSH_KEY="$2"
+            shift 2
+            ;;
+        --packages)
+            PACKAGES="$2"
+            shift 2
+            ;;
+        --create-key)
+            CREATE_SSH_KEY=true
+            shift
+            ;;
+        --no-start)
+            START_VM=false
+            shift
+            ;;
+        -i|--interactive)
+            interactive_mode
+            shift
+            break
+            ;;
+        -h|--help)
+            show_help
+            exit 0
+            ;;
+        *)
+            echo -e "${RED}Option inconnue: $1${NC}"
+            show_help
+            exit 1
+            ;;
+    esac
+done
+
+# Si pas d'arguments, mode interactif
+if [[ -z "$OS_IMAGE$VM_NAME$VM_USER" && $# -eq 0 ]]; then
+    interactive_mode
+fi
+
+# Utiliser les valeurs par défaut si non définies
+OS_IMAGE=${OS_IMAGE:-$DEFAULT_OS_IMAGE}
+VM_NAME=${VM_NAME:-$DEFAULT_VM_NAME}
+VM_USER=${VM_USER:-$DEFAULT_VM_USER}
+VM_PASSWORD=${VM_PASSWORD:-$DEFAULT_VM_PASSWORD}
+VM_SIZE=${VM_SIZE:-$DEFAULT_VM_SIZE}
+VM_MEMORY=${VM_MEMORY:-$DEFAULT_VM_MEMORY}
+VM_CPUS=${VM_CPUS:-$DEFAULT_VM_CPUS}
+SSH_PORT=${SSH_PORT:-$DEFAULT_SSH_PORT}
+SSH_KEY=${SSH_KEY:-$DEFAULT_SSH_KEY}
+PACKAGES=${PACKAGES:-$DEFAULT_PACKAGES}
+
+# Vérifications
+if ! command -v virt-builder &> /dev/null; then
+    echo -e "${RED}virt-builder n'est pas installé${NC}"
+    exit 1
+fi
+
+if ! command -v qemu-system-x86_64 &> /dev/null; then
+    echo -e "${RED}qemu-system-x86_64 n'est pas installé${NC}"
+    exit 1
+fi
+
+# Exécution
+create_ssh_key
+create_vm
+start_vm
