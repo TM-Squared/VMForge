@@ -227,6 +227,15 @@ virt-builder --list
 - **Essential packages**: openssh-server, sudo (always installed)
 - **Default packages**: vim
 
+## Roadmap & Improvements
+
+### Planned Enhancements
+- **Cloud Images Integration**: Replace virt-builder with distribution cloud images for better qcow2 support and dynamic disk growth. Cloud images provide guaranteed boot reliability and optimized disk space management.
+
+### Current Limitations  
+- Uses virt-builder templates which may have bootloader issues with qcow2 format
+- Fixed disk allocation with raw format (space not dynamically allocated)
+
 ## License
 MIT License - See LICENSE file for details.
 
